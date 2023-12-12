@@ -1,0 +1,78 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel Reset
+#pragma kernel Sequence
+
+#include "Assets/Shaders/CGIncludes/Random.cginc"
+#include "Assets/Shaders/CGIncludes/Noise.cginc"
+
+#define PI 3.14159265
+#define TWO_PI 2.0 * PI
+
+struct McmcData
+{
+    float3 position;
+    float  density;
+};
+
+RWStructuredBuffer<McmcData> _ResultBuffer;
+Texture2D<float4> _ProbMap;
+float2 _StddevAspect;
+float _Height;
+int _InitializeN;
+int _SampleN;
+uint _Seed;
+SamplerState _LinearClamp;
+
+float2 Gaussian(int seed)
+{
+    float u1 = pcg(uint(seed))     / float(0xffffffffu);
+    float u2 = pcg(uint(seed + 1)) / float(0xffffffffu);
+    
+    float sqrtLnU1 = sqrt(-2.0 * log(u1));
+    return float2(sqrtLnU1 * cos(TWO_PI * u2), sqrtLnU1 * sin(TWO_PI * u2));
+}
+
+float Density(float2 curr)
+{
+    return _Height * _ProbMap.SampleLevel(_LinearClamp, saturate(curr), 0).r;
+}
+
+[numthreads(8, 1, 1)]
+void Reset(uint3 DTid : SV_DispatchThreadID)
+{
+    if (_ResultBuffer[0].density > 0) return;
+
+    const unsigned int P_ID = DTid.x; // Data ID to operate on
+    McmcData curr;
+    
+    curr.position = float3(wang_hash(P_ID + 234), wang_hash(P_ID + 77), 0);
+    curr.density = Density(curr.position.xy);
+    
+    if(curr.density > 0) _ResultBuffer[0] = curr;
+}
+
+[numthreads(1,1,1)]
+void Sequence(uint3 DTid : SV_DispatchThreadID)
+{
+    const unsigned int P_ID = DTid.x; // Data ID to operate on
+    
+    float2 currPos     = _ResultBuffer[0].position.xy;
+    float  currDensity = _ResultBuffer[0].density;
+    
+    [unroll]
+    for (int i = 0; i < 10; i++)
+    {
+        uint seed = _Seed + i;
+        float2 next = _StddevAspect * Gaussian(seed + i * 5) + currPos;
+        next.x -= floor(next.x);
+        next.y -= floor(next.y);
+        float densityNext = Density(next);
+        if (currDensity <= 0 || min(1.0, densityNext / currDensity) >= wang_hash(seed + 100))
+        {
+            currPos = next;
+            currDensity = densityNext;
+            _ResultBuffer[0].position.xy = currPos;
+            _ResultBuffer[0].density = currDensity;
+        }
+    }
+}
